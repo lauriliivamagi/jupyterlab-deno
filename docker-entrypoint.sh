@@ -1,104 +1,54 @@
-#!/bin/bash
-set -e
+# Use official Jupyter base image
+FROM jupyter/base-notebook:latest
 
-# Configure Jupyter with the provided token
-if [ -n "$JUPYTER_TOKEN" ]; then
-    echo "Configuring Jupyter with authentication token..."
-    
-    # Create jupyter config if it doesn't exist
-    jupyter notebook --generate-config -y || true
-    
-    # Set the token in the config
-    echo "c.NotebookApp.token = '${JUPYTER_TOKEN}'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.token = '${JUPYTER_TOKEN}'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.LabApp.token = '${JUPYTER_TOKEN}'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Disable password prompt
-    echo "c.NotebookApp.password = ''" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.password = ''" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Allow connections from any IP (needed for Docker)
-    echo "c.NotebookApp.ip = '0.0.0.0'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.ip = '0.0.0.0'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Disable browser auto-open
-    echo "c.NotebookApp.open_browser = False" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.open_browser = False" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Set base URL
-    echo "c.NotebookApp.base_url = '/'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.base_url = '/'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Allow root access if needed
-    echo "c.NotebookApp.allow_root = True" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.allow_root = True" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Enable CORS for Open WebUI
-    echo "c.NotebookApp.allow_origin = '*'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.allow_origin = '*'" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.NotebookApp.allow_credentials = True" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.allow_credentials = True" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    
-    # Disable some security features for API access
-    echo "c.NotebookApp.disable_check_xsrf = True" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-    echo "c.ServerApp.disable_check_xsrf = True" >> /home/jovyan/.jupyter/jupyter_notebook_config.py
-fi
+# Switch to root for system installations
+USER root
 
-# Ensure Deno kernel is properly registered
-deno jupyter --unstable --install || true
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create a startup script that will create a kernel after Jupyter starts
-cat > /home/jovyan/start-kernel.py << 'EOF'
-import time
-import requests
-import json
-import os
+# Install Deno (latest stable)
+ENV DENO_INSTALL=/usr/local
+RUN curl -fsSL https://deno.land/install.sh | sh
 
-token = os.environ.get('JUPYTER_TOKEN', '')
-base_url = 'http://localhost:8888'
+# Make deno available in PATH for all users
+RUN ln -s /usr/local/bin/deno /usr/bin/deno
 
-# Wait for Jupyter to be ready
-for i in range(30):
-    try:
-        response = requests.get(f'{base_url}/api', params={'token': token})
-        if response.status_code == 200:
-            print("Jupyter is ready!")
-            break
-    except:
-        pass
-    time.sleep(1)
-else:
-    print("Jupyter failed to start in time")
-    exit(1)
+# Install Python packages for kernel management
+RUN pip install --no-cache-dir requests
 
-# Check if a Deno kernel already exists
-response = requests.get(f'{base_url}/api/kernels', params={'token': token})
-if response.status_code == 200:
-    kernels = response.json()
-    deno_kernels = [k for k in kernels if k.get('name') == 'deno']
-    
-    if not deno_kernels:
-        # Start a new Deno kernel
-        print("Starting Deno kernel...")
-        headers = {'Content-Type': 'application/json'}
-        data = {'name': 'deno'}
-        response = requests.post(
-            f'{base_url}/api/kernels',
-            params={'token': token},
-            headers=headers,
-            json=data
-        )
-        if response.status_code == 201:
-            kernel = response.json()
-            print(f"Deno kernel started: {kernel['id']}")
-        else:
-            print(f"Failed to start kernel: {response.status_code}")
-    else:
-        print(f"Deno kernel already running: {deno_kernels[0]['id']}")
-EOF
+# Switch back to jovyan user
+USER ${NB_UID}
 
-# Start Jupyter in the background, wait a bit, then start a kernel
-(sleep 10 && python /home/jovyan/start-kernel.py) &
+# Pre-create jupyter directories to avoid permission issues
+RUN mkdir -p /home/${NB_USER}/.jupyter \
+    /home/${NB_USER}/.local/share/jupyter/kernels \
+    /home/${NB_USER}/.jupyter/lab/user-settings/@jupyterlab/notebook-extension
 
-# Execute the original command
-exec "$@"
+# Install Deno Jupyter kernel with force flag
+RUN deno jupyter --force --install 2>/dev/null || \
+    deno jupyter --unstable --force --install 2>/dev/null || true
+
+# Configure JupyterLab to use Deno kernel by default
+RUN echo '{"kernelPreference": {"autoStartDefault": "deno"}}' > \
+    /home/${NB_USER}/.jupyter/lab/user-settings/@jupyterlab/notebook-extension/tracker.jupyterlab-settings
+
+# Set the working directory
+WORKDIR /home/${NB_USER}/work
+
+# Expose the JupyterLab port
+EXPOSE 8888
+
+# Copy custom entrypoint
+COPY --chown=${NB_UID}:${NB_GID} docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Set environment variables for better Deno experience
+ENV DENO_DIR=/home/${NB_USER}/.deno \
+    DENO_INSTALL_ROOT=/home/${NB_USER}/.deno/bin
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["start-notebook.sh"]

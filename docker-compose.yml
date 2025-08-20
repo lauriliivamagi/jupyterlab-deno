@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  jupyterlab-deno:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jupyterlab-deno:latest
+    container_name: jupyterlab-deno
+    restart: unless-stopped
+
+    ports:
+      - "8889:8888"
+
+    environment:
+      # Set the Jupyter token - CHANGE THIS in Portainer!
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-your-secure-token-here}
+      # Enable Jupyter Lab by default
+      - JUPYTER_ENABLE_LAB=yes
+      # Disable token requirement for read-only access (optional)
+      - JUPYTER_ALLOW_ORIGIN='*'
+      # Grant sudo rights to jovyan user (optional, remove in production)
+      - GRANT_SUDO=no
+      # Set the default kernel
+      - JUPYTER_DEFAULT_KERNEL=deno
+
+    volumes:
+      # Persistent storage for notebooks
+      - jupyter_notebooks:/home/jovyan/work
+      # Optional: Mount local directory for development
+      # - ./notebooks:/home/jovyan/work
+
+    networks:
+      - jupyter_network
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  jupyter_notebooks:
+    driver: local
+    name: jupyterlab_deno_notebooks
+
+networks:
+  jupyter_network:
+    driver: bridge
+    name: jupyterlab_deno_network
